@@ -11,13 +11,9 @@ pub struct SmbTransport {
 
 impl SmbTransport {
     pub async fn connect(host: &str) -> Result<Self> {
-        let addr = if host.contains(':') {
-            host.to_string()
-        } else {
-            format!("{host}:445")
-        };
+        // Routes through the registered SOCKS5 proxy if one is set, else direct (default 445).
         Ok(SmbTransport {
-            stream: TcpStream::connect(addr).await?,
+            stream: crate::socks::dial(host, 445).await?,
         })
     }
 

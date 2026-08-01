@@ -10,6 +10,7 @@ pub mod client;
 pub mod header;
 pub mod msg;
 pub mod server;
+pub mod socks;
 pub mod spnego;
 pub mod transport;
 
