@@ -66,10 +66,14 @@ fn host_port(host: &str, default_port: u16) -> (String, u16) {
 /// (ATYP=domain) so internal names resolve on the pivot side.
 pub async fn dial(host: &str, default_port: u16) -> Result<TcpStream> {
     let (h, p) = host_port(host, default_port);
-    match proxy() {
-        Some(cfg) => socks5_connect(cfg, &h, p).await,
-        None => TcpStream::connect((h.as_str(), p)).await,
-    }
+    let s = match proxy() {
+        Some(cfg) => socks5_connect(cfg, &h, p).await?,
+        None => TcpStream::connect((h.as_str(), p)).await?,
+    };
+    // Disable Nagle: SMB/RPC does many small writes (opens/queries ~90-200B sealed);
+    // Nagle+delayed-ACK adds up to 40ms per call. -300..500ms on secretsdump.
+    let _ = s.set_nodelay(true);
+    Ok(s)
 }
 
 async fn socks5_connect(cfg: &Socks5, dst_host: &str, dst_port: u16) -> Result<TcpStream> {

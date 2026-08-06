@@ -261,9 +261,12 @@ impl SmbClient {
         // Poll for the file: it may not exist yet (writer still spawning →
         // OBJECT_NAME_NOT_FOUND) or the writer may still hold it without share-delete (→
         // SHARING_VIOLATION). Both are transient; wait for the child to finish and release.
+        // Cap: 12 attempts × 250 ms = 3 s. When the writer legitimately succeeded the file
+        // shows up in well under a second; longer polling just draws out the failure case
+        // (e.g. `reg save HKLM\SAM` refused on a hardened DC, file will never appear).
         let mut file_id = None;
         let mut last = status::OBJECT_NAME_NOT_FOUND;
-        for attempt in 0..40 {
+        for attempt in 0..12 {
             let resp = self
                 .call(
                     cmd::CREATE,
@@ -279,7 +282,7 @@ impl SmbClient {
             if p.status != status::OBJECT_NAME_NOT_FOUND && p.status != status::SHARING_VIOLATION {
                 return Err(SmbError::Status(p.status, cmd::CREATE));
             }
-            if attempt < 39 {
+            if attempt < 11 {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
         }
