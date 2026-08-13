@@ -31,7 +31,7 @@ let pipe = c.open_pipe("srvsvc").await?;   // now drive DCE/RPC over the pipe
 ```
 
 Pairs with [`dcerpc`](https://crates.io/crates/dcerpc) for SAMR / LSAT / DRSUAPI etc. over the
-named-pipe transport — together they're the "impacket for Rust" that didn't previously exist.
+named-pipe transport — together they're the "spec-vector captures for Rust" that didn't previously exist.
 
 ## Scope
 
