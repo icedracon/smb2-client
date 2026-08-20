@@ -1,4 +1,4 @@
-//! A minimal SMB2 client — the impacket `smb3`/`smbconnection` equivalent, scoped to what
+//! A minimal SMB2 client — from-scratch pure Rust, scoped to what
 //! named-pipe DCE/RPC needs: negotiate (dialect 2.1.0), NTLM session setup, tree-connect to
 //! IPC$, create a pipe, and FSCTL_PIPE_TRANSCEIVE to carry RPC PDUs.
 //!
