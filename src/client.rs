@@ -317,4 +317,90 @@ impl SmbClient {
         let _ = self.call(cmd::CLOSE, &msg::close_req(&file_id)).await;
         Ok(data)
     }
+
+    /// Read a whole file off the connected disk share without modifying it.
+    ///
+    /// Unlike `read_file_delete`, this opens read-only (no DELETE_ON_CLOSE) and
+    /// does not poll: it fails immediately if the file is absent. `path` is
+    /// relative to the share root, e.g. `DOMAIN.LOCAL\Policies\{GUID}\GPT.INI`.
+    /// Tree-connect the share first.
+    pub async fn read_file(&mut self, path: &str) -> Result<Vec<u8>> {
+        use crate::status;
+        const ACCESS: u32 = 0x0012_0089; // READ_DATA | READ_ATTRS | READ_EA | READ_CONTROL | SYNCHRONIZE
+        const SHARE: u32 = 0x0000_0007; // R | W | D
+        const OPEN: u32 = 0x0000_0001; // FILE_OPEN (fail if absent)
+        const OPTS: u32 = 0x0000_0060; // NON_DIRECTORY | SYNCHRONOUS_IO_NONALERT (no delete)
+
+        let resp = self
+            .call(cmd::CREATE, &msg::create_file(path, ACCESS, SHARE, OPEN, OPTS))
+            .await?;
+        let file_id = msg::create_file_id(&Self::ok(&resp, cmd::CREATE).map(|_| resp.clone())?)?;
+
+        // Read to EOF in 64 KiB chunks.
+        let mut data = Vec::new();
+        loop {
+            let resp = self
+                .call(cmd::READ, &msg::read_req(&file_id, data.len() as u64, 0x0001_0000))
+                .await?;
+            let p = header::parse(&resp)?;
+            if p.status == status::END_OF_FILE || p.status != status::SUCCESS {
+                break;
+            }
+            let chunk = msg::read_output(&resp)?;
+            if chunk.is_empty() {
+                break;
+            }
+            data.extend_from_slice(&chunk);
+            if chunk.len() < 0x0001_0000 {
+                break;
+            }
+        }
+        let _ = self.call(cmd::CLOSE, &msg::close_req(&file_id)).await;
+        Ok(data)
+    }
+
+    /// List a directory on the connected disk share.
+    ///
+    /// `path` is relative to the share root ("" for the root itself). Returns
+    /// entries (name, is_dir, size), excluding "." and "..". Tree-connect the
+    /// share first. Use with `read_file` to walk SYSVOL for GPO files.
+    pub async fn list_dir(&mut self, path: &str) -> Result<Vec<msg::DirEntry>> {
+        use crate::status;
+        const ACCESS: u32 = 0x0010_0001; // FILE_LIST_DIRECTORY | SYNCHRONIZE
+        const SHARE: u32 = 0x0000_0007; // R | W | D
+        const OPEN: u32 = 0x0000_0001; // FILE_OPEN
+        const OPTS: u32 = 0x0000_0021; // DIRECTORY_FILE | SYNCHRONOUS_IO_NONALERT
+
+        let resp = self
+            .call(cmd::CREATE, &msg::create_file(path, ACCESS, SHARE, OPEN, OPTS))
+            .await?;
+        Self::ok(&resp, cmd::CREATE)?;
+        let file_id = msg::create_file_id(&resp)?;
+
+        // Drain the enumeration: QUERY_DIRECTORY until NO_MORE_FILES.
+        let mut entries = Vec::new();
+        loop {
+            let resp = self
+                .call(
+                    cmd::QUERY_DIRECTORY,
+                    &msg::query_directory_req(&file_id, msg::FILE_DIRECTORY_INFORMATION, "*", 0x0001_0000),
+                )
+                .await?;
+            let p = header::parse(&resp)?;
+            if p.status == status::NO_MORE_FILES {
+                break;
+            }
+            if p.status != status::SUCCESS {
+                let _ = self.call(cmd::CLOSE, &msg::close_req(&file_id)).await;
+                return Err(SmbError::Status(p.status, cmd::QUERY_DIRECTORY));
+            }
+            let buf = msg::query_directory_output(&resp)?;
+            if buf.is_empty() {
+                break;
+            }
+            entries.extend(msg::parse_dir_entries(&buf)?);
+        }
+        let _ = self.call(cmd::CLOSE, &msg::close_req(&file_id)).await;
+        Ok(entries)
+    }
 }

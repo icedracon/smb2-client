@@ -232,6 +232,85 @@ pub fn ioctl_output(msg: &[u8]) -> Result<Vec<u8>> {
         .ok_or(SmbError::Truncated)
 }
 
+// ---- QUERY_DIRECTORY (§2.2.33 / §2.2.34) ----------------------------------
+
+/// FileDirectoryInformation class (§2.4.10).
+pub const FILE_DIRECTORY_INFORMATION: u8 = 0x01;
+
+/// SMB2 QUERY_DIRECTORY request (§2.2.33). `pattern` is a search wildcard such
+/// as "*". `output_len` caps the reply buffer (e.g. 64 KiB).
+pub fn query_directory_req(
+    file_id: &[u8; 16],
+    info_class: u8,
+    pattern: &str,
+    output_len: u32,
+) -> Vec<u8> {
+    let name = utf16le(pattern);
+    let mut b = Vec::new();
+    b.extend_from_slice(&33u16.to_le_bytes()); // StructureSize
+    b.push(info_class); // FileInformationClass
+    b.push(0); // Flags
+    b.extend_from_slice(&0u32.to_le_bytes()); // FileIndex
+    b.extend_from_slice(file_id);
+    let name_off = 64u16 + 32; // header + 32-byte body
+    b.extend_from_slice(&name_off.to_le_bytes()); // FileNameOffset
+    b.extend_from_slice(&(name.len() as u16).to_le_bytes()); // FileNameLength
+    b.extend_from_slice(&output_len.to_le_bytes()); // OutputBufferLength
+    b.extend_from_slice(&name); // Buffer (search pattern)
+    b
+}
+
+/// One directory entry decoded from a FileDirectoryInformation buffer.
+pub struct DirEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+/// Extract the raw output buffer of a QUERY_DIRECTORY response (§2.2.34).
+pub fn query_directory_output(msg: &[u8]) -> Result<Vec<u8>> {
+    let body = msg.get(64..).ok_or(SmbError::Truncated)?;
+    let off = u16(body, 2) as usize; // OutputBufferOffset, from header start
+    let len = u32(body, 4) as usize; // OutputBufferLength
+    msg.get(off..off + len).map(|s| s.to_vec()).ok_or(SmbError::Truncated)
+}
+
+/// Parse a FileDirectoryInformation buffer into entries. Skips "." and "..".
+pub fn parse_dir_entries(buf: &[u8]) -> Result<Vec<DirEntry>> {
+    const ATTR_DIRECTORY: u32 = 0x0000_0010;
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    loop {
+        let e = buf.get(pos..).ok_or(SmbError::Truncated)?;
+        if e.len() < 64 {
+            break;
+        }
+        let next = u32(e, 0) as usize; // NextEntryOffset
+        let end_of_file = u64::from_le_bytes(e[40..48].try_into().unwrap());
+        let attrs = u32(e, 56); // FileAttributes
+        let name_len = u32(e, 60) as usize; // FileNameLength
+        let name_bytes = e.get(64..64 + name_len).ok_or(SmbError::Truncated)?;
+        let name = String::from_utf16_lossy(
+            &name_bytes
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect::<Vec<u16>>(),
+        );
+        if name != "." && name != ".." {
+            out.push(DirEntry {
+                name,
+                is_dir: attrs & ATTR_DIRECTORY != 0,
+                size: end_of_file,
+            });
+        }
+        if next == 0 {
+            break; // last entry
+        }
+        pos += next;
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

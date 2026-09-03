@@ -42,4 +42,5 @@ pub mod status {
     pub const END_OF_FILE: u32 = 0xC000_0011;
     pub const OBJECT_NAME_NOT_FOUND: u32 = 0xC000_0034;
     pub const SHARING_VIOLATION: u32 = 0xC000_0043;
+    pub const NO_MORE_FILES: u32 = 0x8000_0006; 
 }
