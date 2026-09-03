@@ -128,6 +128,21 @@ impl SmbClient {
         Ok(())
     }
 
+    /// Null / anonymous session: negotiate + NTLM session setup with empty
+    /// domain / user / password. On a DC that still permits anonymous IPC$
+    /// (`RestrictAnonymous=0`) this yields a session usable for
+    /// SAMR / LSAT RID-cycling and share enumeration; on a hardened DC
+    /// (2019+ default) the server returns `STATUS_ACCESS_DENIED` /
+    /// `STATUS_LOGON_FAILURE` and the caller reports the box as hardened.
+    ///
+    /// Uses an empty-credential NTLMv2 exchange (the classic
+    /// `""` / `""` / `""` null bind). No signing key results from an
+    /// anonymous logon, so the session is unsigned — callers must not
+    /// attempt signed operations on it.
+    pub async fn login_null(&mut self, host: &str) -> Result<()> {
+        self.login_cred(host, "", "", Cred::Password("")).await
+    }
+
     /// Pass-the-hash: negotiate + NTLM session setup with a raw NT hash.
     pub async fn login_hash(
         &mut self,
