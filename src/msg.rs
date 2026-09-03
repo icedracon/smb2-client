@@ -124,12 +124,21 @@ pub fn create_file(path: &str, access: u32, share: u32, disposition: u32, option
     b.extend_from_slice(&share.to_le_bytes()); // ShareAccess
     b.extend_from_slice(&disposition.to_le_bytes()); // CreateDisposition
     b.extend_from_slice(&options.to_le_bytes()); // CreateOptions
+    // NameOffset always points at the buffer position, and the variable buffer
+    // is always present (≥1 byte). Opening the share root (empty name) needs
+    // NameLength=0 but a NameOffset that still addresses a real byte in the
+    // message plus that mandatory padding byte — Windows returns
+    // STATUS_INVALID_PARAMETER for a 57-byte body whose name buffer is absent.
     let name_off = 64u16 + 56;
     b.extend_from_slice(&name_off.to_le_bytes()); // NameOffset
     b.extend_from_slice(&(n.len() as u16).to_le_bytes()); // NameLength
     b.extend_from_slice(&0u32.to_le_bytes()); // CreateContextsOffset
     b.extend_from_slice(&0u32.to_le_bytes()); // CreateContextsLength
-    b.extend_from_slice(&n);
+    if n.is_empty() {
+        b.push(0); // mandatory 1-byte Buffer when there is no name
+    } else {
+        b.extend_from_slice(&n);
+    }
     b
 }
 
