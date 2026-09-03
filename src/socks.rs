@@ -3,7 +3,7 @@
 //! has been registered with [`set_proxy`] — the pivot support real engagements need. Hand-rolled
 //! (RFC 1928 CONNECT + RFC 1929 user/pass), consistent with the from-scratch stack.
 
-use std::io::{Error, ErrorKind, Result};
+use std::io::{Error, Result};
 use std::sync::OnceLock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -48,7 +48,7 @@ pub fn proxy() -> Option<&'static Socks5> {
 }
 
 fn err(msg: &str) -> Error {
-    Error::new(ErrorKind::Other, msg)
+    Error::other(msg)
 }
 
 /// Split `host` into (host, port), defaulting the port when absent. IPv4/hostnames only.
@@ -93,7 +93,10 @@ async fn socks5_connect(cfg: &Socks5, dst_host: &str, dst_port: u16) -> Result<T
     match sel[1] {
         0x00 => {}
         0x02 => {
-            let (u, pw) = cfg.auth.as_ref().ok_or_else(|| err("SOCKS: proxy demands auth but none given"))?;
+            let (u, pw) = cfg
+                .auth
+                .as_ref()
+                .ok_or_else(|| err("SOCKS: proxy demands auth but none given"))?;
             if u.len() > 255 || pw.len() > 255 {
                 return Err(err("SOCKS: credential too long"));
             }
