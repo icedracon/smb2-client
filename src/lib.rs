@@ -15,6 +15,7 @@ pub mod spnego;
 pub mod transport;
 
 pub use client::{Cred, SmbClient};
+pub use msg::DirEntry;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SmbError {
@@ -42,4 +43,6 @@ pub mod status {
     pub const END_OF_FILE: u32 = 0xC000_0011;
     pub const OBJECT_NAME_NOT_FOUND: u32 = 0xC000_0034;
     pub const SHARING_VIOLATION: u32 = 0xC000_0043;
+    /// STATUS_NO_MORE_FILES — QUERY_DIRECTORY has returned the last entry.
+    pub const NO_MORE_FILES: u32 = 0x8000_0006;
 }

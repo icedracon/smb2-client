@@ -11,6 +11,7 @@ pub mod cmd {
     pub const READ: u16 = 0x0008;
     pub const WRITE: u16 = 0x0009;
     pub const IOCTL: u16 = 0x000B;
+    pub const QUERY_DIRECTORY: u16 = 0x000E;
 }
 
 pub const FLAGS_SIGNED: u32 = 0x0000_0008;

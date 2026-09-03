@@ -332,4 +332,100 @@ impl SmbClient {
         let _ = self.call(cmd::CLOSE, &msg::close_req(&file_id)).await;
         Ok(data)
     }
+
+    /// Enumerate a directory on the currently-connected disk share (SMB2
+    /// QUERY_DIRECTORY, FileDirectoryInformation). `path` is relative to the
+    /// share root (`""` = the root itself). Read-only: opens the directory
+    /// handle, drains entries until STATUS_NO_MORE_FILES, and closes. `.`/`..`
+    /// are filtered out. Tree-connect the share first.
+    pub async fn list_directory(&mut self, path: &str) -> Result<Vec<msg::DirEntry>> {
+        use crate::status;
+        // FILE_LIST_DIRECTORY | READ_ATTRS | SYNCHRONIZE
+        const ACCESS: u32 = 0x0010_0081;
+        const SHARE: u32 = 0x0000_0007; // R | W | D
+        const OPEN: u32 = 0x0000_0001; // FILE_OPEN
+        const OPTS: u32 = 0x0000_0021; // FILE_DIRECTORY_FILE | SYNCHRONOUS_IO_NONALERT
+
+        let resp = self
+            .call(
+                cmd::CREATE,
+                &msg::create_file(path, ACCESS, SHARE, OPEN, OPTS),
+            )
+            .await?;
+        Self::ok(&resp, cmd::CREATE)?;
+        let dir_id = msg::create_file_id(&resp)?;
+
+        let mut entries = Vec::new();
+        // Bound the number of QUERY_DIRECTORY round trips (each returns many
+        // entries); a real directory closes out in a handful of calls.
+        for _ in 0..4096 {
+            let resp = self
+                .call(
+                    cmd::QUERY_DIRECTORY,
+                    &msg::query_directory_req(&dir_id, "*", 0x0001_0000),
+                )
+                .await?;
+            let p = header::parse(&resp)?;
+            if p.status == status::NO_MORE_FILES {
+                break;
+            }
+            if p.status != status::SUCCESS {
+                let _ = self.call(cmd::CLOSE, &msg::close_req(&dir_id)).await;
+                return Err(SmbError::Status(p.status, cmd::QUERY_DIRECTORY));
+            }
+            let batch = msg::parse_directory_info(&resp)?;
+            if batch.is_empty() {
+                break;
+            }
+            entries.extend(batch);
+        }
+        let _ = self.call(cmd::CLOSE, &msg::close_req(&dir_id)).await;
+        Ok(entries)
+    }
+
+    /// Read a whole file off the currently-connected disk share, read-only, and
+    /// close WITHOUT deleting it (unlike [`read_file_delete`], which is for our
+    /// own exec output). `path` is relative to the share root. Fails if the
+    /// file is absent. Tree-connect the share first.
+    pub async fn read_file(&mut self, path: &str) -> Result<Vec<u8>> {
+        use crate::status;
+        // FILE_READ_DATA | READ_ATTRS | SYNCHRONIZE (no DELETE)
+        const ACCESS: u32 = 0x0010_0081;
+        const SHARE: u32 = 0x0000_0001; // R (let others read too)
+        const OPEN: u32 = 0x0000_0001; // FILE_OPEN
+        const OPTS: u32 = 0x0000_0060; // NON_DIRECTORY | SYNCHRONOUS_IO_NONALERT (no DELETE_ON_CLOSE)
+
+        let resp = self
+            .call(
+                cmd::CREATE,
+                &msg::create_file(path, ACCESS, SHARE, OPEN, OPTS),
+            )
+            .await?;
+        Self::ok(&resp, cmd::CREATE)?;
+        let file_id = msg::create_file_id(&resp)?;
+
+        let mut data = Vec::new();
+        loop {
+            let resp = self
+                .call(
+                    cmd::READ,
+                    &msg::read_req(&file_id, data.len() as u64, 0x0001_0000),
+                )
+                .await?;
+            let p = header::parse(&resp)?;
+            if p.status == status::END_OF_FILE || p.status != status::SUCCESS {
+                break;
+            }
+            let chunk = msg::read_output(&resp)?;
+            if chunk.is_empty() {
+                break;
+            }
+            data.extend_from_slice(&chunk);
+            if chunk.len() < 0x0001_0000 {
+                break;
+            }
+        }
+        let _ = self.call(cmd::CLOSE, &msg::close_req(&file_id)).await;
+        Ok(data)
+    }
 }

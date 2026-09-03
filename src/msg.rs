@@ -196,6 +196,102 @@ pub fn create_file_id(msg: &[u8]) -> Result<[u8; 16]> {
         .ok_or(SmbError::Truncated)
 }
 
+/// One entry from a directory enumeration (FileDirectoryInformation, class 1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+/// SMB2 QUERY_DIRECTORY (§2.2.33): enumerate an open directory handle using
+/// FileDirectoryInformation (class 1). `pattern` is the search wildcard
+/// (typically `*`); on continuation calls the server ignores it and resumes
+/// from where the handle left off, so passing `*` every time is correct.
+pub fn query_directory_req(file_id: &[u8; 16], pattern: &str, output_len: u32) -> Vec<u8> {
+    const FILE_DIRECTORY_INFORMATION: u8 = 0x01;
+    let n = utf16le(pattern);
+    let mut b = Vec::new();
+    b.extend_from_slice(&33u16.to_le_bytes()); // StructureSize (fixed 33)
+    b.push(FILE_DIRECTORY_INFORMATION); // FileInformationClass
+    b.push(0); // Flags (0: resume from handle position)
+    b.extend_from_slice(&0u32.to_le_bytes()); // FileIndex
+    b.extend_from_slice(file_id);
+    let name_off = 64u16 + 32; // header + 32-byte fixed body
+    b.extend_from_slice(&name_off.to_le_bytes()); // FileNameOffset
+    b.extend_from_slice(&(n.len() as u16).to_le_bytes()); // FileNameLength
+    b.extend_from_slice(&output_len.to_le_bytes()); // OutputBufferLength
+    if n.is_empty() {
+        b.push(0); // Buffer min 1 byte
+    } else {
+        b.extend_from_slice(&n);
+    }
+    b
+}
+
+/// Parse a QUERY_DIRECTORY response (§2.2.34) carrying FileDirectoryInformation
+/// entries. Bounds-checked and loop-bounded: a hostile server cannot drive an
+/// out-of-range read or a non-terminating walk (a NextEntryOffset that fails to
+/// advance, or an entry claiming a name longer than the buffer, ends parsing).
+pub fn parse_directory_info(msg: &[u8]) -> Result<Vec<DirEntry>> {
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    let body = msg.get(64..).ok_or(SmbError::Truncated)?;
+    // Response fixed part: StructureSize(2), OutputBufferOffset(2), OutputBufferLength(4).
+    // Guard its 8 bytes before the direct-indexing u16/u32 helpers touch them —
+    // a truncated response must return empty, not panic.
+    if body.len() < 8 {
+        return Ok(Vec::new());
+    }
+    let out_off = u16(body, 2) as usize; // from header start
+    let out_len = u32(body, 4) as usize;
+    let buf = msg
+        .get(out_off..out_off.checked_add(out_len).ok_or(SmbError::Truncated)?)
+        .ok_or(SmbError::Truncated)?;
+
+    let mut entries = Vec::new();
+    let mut pos = 0usize;
+    // Cap iterations well above any real directory to bound a malformed chain.
+    for _ in 0..100_000 {
+        let rec = match buf.get(pos..) {
+            Some(r) if r.len() >= 64 => r,
+            _ => break,
+        };
+        let next = u32(rec, 0) as usize; // NextEntryOffset
+        let attrs = u32(rec, 56); // FileAttributes
+        let name_len = u32(rec, 60) as usize; // FileNameLength (bytes)
+                                              // FileName starts at fixed offset 64 within the record.
+        if let Some(name_bytes) = rec.get(64..64usize.saturating_add(name_len)) {
+            let units: Vec<u16> = name_bytes
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            let name = String::from_utf16_lossy(&units);
+            if name != "." && name != ".." && !name.is_empty() {
+                entries.push(DirEntry {
+                    name,
+                    is_dir: attrs & FILE_ATTRIBUTE_DIRECTORY != 0,
+                    size: u64::from_le_bytes(
+                        rec.get(40..48)
+                            .and_then(|s| s.try_into().ok())
+                            .unwrap_or([0; 8]),
+                    ),
+                });
+            }
+        } else {
+            break; // name overruns the record → stop, don't read OOB
+        }
+        if next == 0 {
+            break; // last entry
+        }
+        // NextEntryOffset must strictly advance, else a hostile 0-cycle loops forever.
+        pos = match pos.checked_add(next) {
+            Some(p) if p > pos => p,
+            _ => break,
+        };
+    }
+    Ok(entries)
+}
+
 // ---- IOCTL (§2.2.31 / §2.2.32) --------------------------------------------
 
 pub const FSCTL_PIPE_TRANSCEIVE: u32 = 0x0011_C017;
@@ -259,6 +355,84 @@ mod tests {
         let b = ioctl_transceive(&[0; 16], &[1, 2, 3]);
         assert_eq!(u32(&b, 4), FSCTL_PIPE_TRANSCEIVE);
         assert_eq!(u32(&b, 28), 3); // InputCount
+    }
+
+    #[test]
+    fn query_directory_req_shape() {
+        let b = query_directory_req(&[0; 16], "*", 0x1_0000);
+        assert_eq!(u16(&b, 0), 33); // StructureSize
+        assert_eq!(b[2], 0x01); // FileInformationClass = FileDirectoryInformation
+        assert_eq!(u16(&b, 24), 64 + 32); // FileNameOffset
+        assert_eq!(u16(&b, 26), 2); // FileNameLength ("*" = 1 wchar × 2)
+        assert_eq!(u32(&b, 28), 0x1_0000); // OutputBufferLength
+    }
+
+    // Hand-build a QUERY_DIRECTORY response with two FileDirectoryInformation
+    // records (a directory "Policies" and a file "GptTmpl.inf") plus the "."/".."
+    // entries that must be filtered. Validates the NDR-free info walk.
+    #[test]
+    fn parse_directory_info_reads_entries_and_filters_dot() {
+        fn rec(out: &mut Vec<u8>, next: u32, attrs: u32, size: u64, name: &str) {
+            let units: Vec<u16> = name.encode_utf16().collect();
+            let name_bytes: Vec<u8> = units.iter().flat_map(|u| u.to_le_bytes()).collect();
+            let start = out.len();
+            out.extend_from_slice(&next.to_le_bytes()); // 0 NextEntryOffset
+            out.extend_from_slice(&0u32.to_le_bytes()); // 4 FileIndex
+            out.extend_from_slice(&[0u8; 32]); // 8..40 four FILETIMEs
+            out.extend_from_slice(&size.to_le_bytes()); // 40 EndOfFile
+            out.extend_from_slice(&0u64.to_le_bytes()); // 48 AllocationSize
+            out.extend_from_slice(&attrs.to_le_bytes()); // 56 FileAttributes
+            out.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes()); // 60 FileNameLength
+            out.extend_from_slice(&name_bytes); // 64.. FileName
+            if next != 0 {
+                // pad this record out to exactly `next` bytes
+                while out.len() - start < next as usize {
+                    out.push(0);
+                }
+            }
+        }
+        let mut buf = Vec::new();
+        rec(&mut buf, 72, 0x10, 0, "."); // filtered
+        rec(&mut buf, 72, 0x10, 0, ".."); // filtered
+        rec(&mut buf, 80, 0x10, 0, "Policies"); // dir
+        rec(&mut buf, 0, 0x20, 1234, "GptTmpl.inf"); // file (last)
+
+        // Wrap in an SMB2 response: 64-byte header + fixed part (StructureSize,
+        // OutputBufferOffset, OutputBufferLength), then the buffer.
+        let out_off = 64u16 + 8;
+        let mut msg = vec![0u8; 64];
+        msg.extend_from_slice(&9u16.to_le_bytes()); // StructureSize
+        msg.extend_from_slice(&out_off.to_le_bytes()); // OutputBufferOffset
+        msg.extend_from_slice(&(buf.len() as u32).to_le_bytes()); // OutputBufferLength
+        msg.extend_from_slice(&buf);
+
+        let entries = parse_directory_info(&msg).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "Policies");
+        assert!(entries[0].is_dir);
+        assert_eq!(entries[1].name, "GptTmpl.inf");
+        assert!(!entries[1].is_dir);
+        assert_eq!(entries[1].size, 1234);
+    }
+
+    #[test]
+    fn parse_directory_info_survives_hostile_input() {
+        // Truncated / zero buffers must not panic.
+        for cut in 0..80 {
+            let _ = parse_directory_info(&vec![0u8; cut]);
+        }
+        // A record whose NextEntryOffset does not advance (0-cycle guard) and a
+        // name_len that overruns the record must terminate, not loop/OOB.
+        let mut buf = vec![0u8; 64];
+        buf[60..64].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // FileNameLength = u32::MAX
+        let out_off = 64u16 + 8;
+        let mut msg = vec![0u8; 64];
+        msg.extend_from_slice(&9u16.to_le_bytes());
+        msg.extend_from_slice(&out_off.to_le_bytes());
+        msg.extend_from_slice(&(buf.len() as u32).to_le_bytes());
+        msg.extend_from_slice(&buf);
+        let entries = parse_directory_info(&msg).unwrap();
+        assert!(entries.is_empty()); // name overrun → skipped, next=0 → stop
     }
 
     #[test]
