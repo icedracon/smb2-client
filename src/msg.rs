@@ -124,6 +124,7 @@ pub fn create_file(path: &str, access: u32, share: u32, disposition: u32, option
     b.extend_from_slice(&share.to_le_bytes()); // ShareAccess
     b.extend_from_slice(&disposition.to_le_bytes()); // CreateDisposition
     b.extend_from_slice(&options.to_le_bytes()); // CreateOptions
+
     // NameOffset always points at the buffer position, and the variable buffer
     // is always present (≥1 byte). Opening the share root (empty name) needs
     // NameLength=0 but a NameOffset that still addresses a real byte in the
@@ -213,12 +214,40 @@ pub struct DirEntry {
     pub size: u64,
 }
 
+/// FileDirectoryInformation class (§2.4.10) — the classic
+/// name+attrs+size directory-enumeration info-class. Exposed publicly
+/// in 0.2.4 (adopted from g0h4n's PR #1) so downstream callers building
+/// custom `query_directory_req`-shaped requests do not have to remember
+/// the magic byte. Additional info classes (FileFullDirectoryInformation
+/// class 2, FileBothDirectoryInformation class 3, etc.) can be added
+/// alongside if needed.
+pub const FILE_DIRECTORY_INFORMATION: u8 = 0x01;
+
+/// Raw output-buffer extractor for a QUERY_DIRECTORY response (§2.2.34).
+/// Returns the whole info-class buffer as bytes; callers that want the
+/// higher-level `Vec<DirEntry>` decoding call [`parse_directory_info`]
+/// instead. Adopted from g0h4n's PR #1 for 0.2.4 — useful when a caller
+/// wants to walk a non-FileDirectoryInformation info-class from the same
+/// wire framing. Bounds-checked: a truncated response returns
+/// `SmbError::Truncated`, never panics through the direct-indexing
+/// helpers.
+pub fn query_directory_output(msg: &[u8]) -> Result<Vec<u8>> {
+    let body = msg.get(64..).ok_or(SmbError::Truncated)?;
+    if body.len() < 8 {
+        return Err(SmbError::Truncated);
+    }
+    let off = u16(body, 2) as usize; // OutputBufferOffset, from header start
+    let len = u32(body, 4) as usize; // OutputBufferLength
+    msg.get(off..off.checked_add(len).ok_or(SmbError::Truncated)?)
+        .map(|s| s.to_vec())
+        .ok_or(SmbError::Truncated)
+}
+
 /// SMB2 QUERY_DIRECTORY (§2.2.33): enumerate an open directory handle using
 /// FileDirectoryInformation (class 1). `pattern` is the search wildcard
 /// (typically `*`); on continuation calls the server ignores it and resumes
 /// from where the handle left off, so passing `*` every time is correct.
 pub fn query_directory_req(file_id: &[u8; 16], pattern: &str, output_len: u32) -> Vec<u8> {
-    const FILE_DIRECTORY_INFORMATION: u8 = 0x01;
     let n = utf16le(pattern);
     let mut b = Vec::new();
     b.extend_from_slice(&33u16.to_le_bytes()); // StructureSize (fixed 33)

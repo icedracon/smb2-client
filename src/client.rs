@@ -384,14 +384,18 @@ impl SmbClient {
     }
 
     /// Read a whole file off the currently-connected disk share, read-only, and
-    /// close WITHOUT deleting it (unlike [`read_file_delete`], which is for our
-    /// own exec output). `path` is relative to the share root. Fails if the
-    /// file is absent. Tree-connect the share first.
+    /// close WITHOUT deleting it (unlike [`SmbClient::read_file_delete`],
+    /// which is for our own exec output). `path` is relative to the share
+    /// root. Fails if the file is absent. Tree-connect the share first.
     pub async fn read_file(&mut self, path: &str) -> Result<Vec<u8>> {
         use crate::status;
-        // FILE_READ_DATA | READ_ATTRS | SYNCHRONIZE (no DELETE)
-        const ACCESS: u32 = 0x0010_0081;
-        const SHARE: u32 = 0x0000_0001; // R (let others read too)
+        // 0.2.4: broadened per g0h4n's PR #1. The Windows SMB client
+        // canonically requests READ_DATA | READ_ATTRS | READ_EA |
+        // READ_CONTROL | SYNCHRONIZE for a plain-file open; matching that
+        // avoids servers that reject the narrower 0x0010_0081 mask, and
+        // aligns behaviour with `smbclient` / other well-known clients.
+        const ACCESS: u32 = 0x0012_0089; // READ_DATA | READ_ATTRS | READ_EA | READ_CONTROL | SYNCHRONIZE
+        const SHARE: u32 = 0x0000_0007; // R | W | D — allow concurrent writers (industry default)
         const OPEN: u32 = 0x0000_0001; // FILE_OPEN
         const OPTS: u32 = 0x0000_0060; // NON_DIRECTORY | SYNCHRONOUS_IO_NONALERT (no DELETE_ON_CLOSE)
 

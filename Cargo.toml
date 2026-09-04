@@ -1,6 +1,6 @@
 [package]
 name = "smb2-client"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 rust-version = "1.74"
 description = "Minimal async SMB2 client in pure Rust: negotiate, NTLMv2 (SPNEGO) session setup, message signing (HMAC-SHA256 / AES-CMAC), tree connect, named-pipe and file I/O — no FFI."

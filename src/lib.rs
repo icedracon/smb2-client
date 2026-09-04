@@ -42,6 +42,11 @@ pub mod status {
     pub const MORE_PROCESSING_REQUIRED: u32 = 0xC000_0016;
     pub const END_OF_FILE: u32 = 0xC000_0011;
     pub const OBJECT_NAME_NOT_FOUND: u32 = 0xC000_0034;
+    /// STATUS_OBJECT_PATH_NOT_FOUND — a component of the path prefix does
+    /// not exist (distinct from `OBJECT_NAME_NOT_FOUND` where the final
+    /// leaf is missing). Useful for CREATE against a nested share path.
+    /// Adopted from g0h4n's PR #1 for 0.2.4.
+    pub const OBJECT_PATH_NOT_FOUND: u32 = 0xC000_003A;
     pub const SHARING_VIOLATION: u32 = 0xC000_0043;
     /// STATUS_NO_MORE_FILES — QUERY_DIRECTORY has returned the last entry.
     pub const NO_MORE_FILES: u32 = 0x8000_0006;
