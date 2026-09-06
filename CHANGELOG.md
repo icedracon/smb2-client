@@ -7,6 +7,20 @@ project adheres to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-09-06
+
+### Documentation
+
+- Correct the Features section: the client offers SMB 2.0.2 + 2.1.0
+  only (not "2.0.2 → 3.x"). SMB 3.x is not offered yet — the source
+  comment in `msg::negotiate` already said so; the README overclaimed.
+- Correct the signing claim: HMAC-SHA256 is exercised over the offered
+  2.x dialects (live-validated). AES-CMAC / SP800-108 KDF code exists
+  in `header.rs` (`sign_v3` / `kdf_signing_key`) but is not validated —
+  the client never reaches that branch today because 3.x isn't offered.
+
+No code changes.
+
 ## [0.2.4] — 2026-09-04
 
 Convergence release: incorporates improvements from
