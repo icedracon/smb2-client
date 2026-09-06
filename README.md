@@ -10,9 +10,12 @@ for authentication.
 
 ## Features
 
-- SMB2 NEGOTIATE (multi-dialect: 2.0.2 → 3.x) and **NTLMv2 session setup** wrapped in SPNEGO,
-  from a password or an NT hash (**pass-the-hash**).
-- Message **signing**: HMAC-SHA256 (SMB 2.x) and AES-CMAC (SMB 3.0.x), with the SP800-108 KDF.
+- SMB2 NEGOTIATE — offers dialects **2.0.2 + 2.1.0**; the server picks the highest, so this
+  reaches Server 2008 through 2025. **SMB 3.x is not offered yet** (see Scope). **NTLMv2 session
+  setup** wrapped in SPNEGO, from a password or an NT hash (**pass-the-hash**).
+- Message **signing**: HMAC-SHA256 over the offered 2.x dialects (live-validated).
+  AES-CMAC / SP800-108 KDF code exists for SMB 3.0.x but is **not validated** — the
+  client never reaches that branch today because 3.x isn't offered.
 - TREE_CONNECT, named-pipe open/read/write (the transport under DCE/RPC-over-SMB), and
   disk-file read (for pulling command output back over `C$`).
 - A small SMB2 **server** side (`server`) sufficient to stand up an NTLM capture endpoint.
